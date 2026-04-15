@@ -1,0 +1,16 @@
+# Build and installers
+*.msi
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+
+# Local folders
+Paraview/
+.vscode/
+
+# Simulation Results
+*.vtu
+*.pvd
+*.xdmf
