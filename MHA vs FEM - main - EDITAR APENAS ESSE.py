@@ -2,26 +2,52 @@ from dolfin import *
 import numpy as np
 import matplotlib.pyplot as plt
 
-def comparar_mha_mef():
-    # =======================================================
-    # 1. PARÂMETROS GEOMÉTRICOS E FÍSICOS
-    # =======================================================
-    R_int, R_ext = 9.0, 11.0 #Raio interno e externo
-    H = 2.0 # Expessura
-    P_int = 10e6 # Pressão interna
+def comparar_mha_mef(
+    R_int=9.0, R_ext=11.0, H=2.0, P_int=10e6,
+    E1=200e9, nu1=0.3, E2=70e9, nu2=0.33,
+    V1=0.5,
+    N_camadas=200, n_elem_r=800, n_elem_z=10,
+    callback=None
+):
+    """
+    Executa a simulação comparativa MEF Heterogêneo vs MHA Homogeneizado.
 
-    # Material 1 (Ex: Aço) e Material 2 (Ex: Alumínio)
-    E1, nu1 = 200e9, 0.3
-    E2, nu2 = 70e9, 0.33
+    Parâmetros (todos opcionais, com defaults dos valores originais):
+        R_int, R_ext : Raio interno e externo (mm)
+        H            : Espessura (mm)
+        P_int        : Pressão interna (Pa)
+        E1, nu1      : Módulo de Young e Poisson do Material 1 (Aço)
+        E2, nu2      : Módulo de Young e Poisson do Material 2 (Alumínio)
+        V1           : Fração volumétrica do Material 1
+        N_camadas    : Número de camadas
+        n_elem_r     : Elementos na direção radial
+        n_elem_z     : Elementos na direção axial
+        callback     : Função callback(etapa: str) para feedback visual (ex: spinners do Streamlit).
+                       Quando None, usa print().
 
-    # Número de camadas (Volume fraction 50/50)
-    N_camadas = 200
+    Retorna:
+        dict com: R_vals, u_r_mef, u_r_mha, erro_abs, interfaces,
+                  N_camadas, n_elem_r, n_elem_z, total_elementos
+    """
+    def notificar(etapa):
+        if callback:
+            callback(etapa)
+        else:
+            print(etapa)
+
+    V2 = 1.0 - V1
+
+    # =======================================================
+    # 1. PARÂMETROS DERIVADOS
+    # =======================================================
     interfaces = np.linspace(R_int, R_ext, N_camadas + 1)[1:-1] # Exclui as extremidades
 
     # =======================================================
     # 2. CÁLCULO DOS COEFICIENTES HOMOGENEIZADOS (MHA)
     # Baseado na Teoria de Laminação (Homogeneização Assintótica 1D)
     # =======================================================
+    notificar("Calculando coeficientes homogeneizados...")
+
     def get_C_matrix(E, nu):
         # Retorna C11 e C12 para material isotrópico
         C11 = E * (1 - nu) / ((1 + nu) * (1 - 2 * nu))
@@ -32,25 +58,18 @@ def comparar_mha_mef():
     C11_1, C12_1, G_1 = get_C_matrix(E1, nu1)
     C11_2, C12_2, G_2 = get_C_matrix(E2, nu2)
 
-    V1 = 0.5 # Fração de volume da camada 1
-    V2 = 0.5 # Fração de volume da camada 2
-    # Por que a soluçãp diverge quando altero as frações volumétricas?
-    # Possivelmente pois este código não está completamente adaptado à frações fora do 50/50
-
     # Coeficientes Efetivos (Média Harmônica na direção radial, Aritmética nas outras)
     C11_eff = 1.0 / (V1/C11_1 + V2/C11_2)
     C12_eff = C11_eff * (V1 * C12_1/C11_1 + V2 * C12_2/C11_2)
-    C22_eff = (V1*C11_1 + V2*C11_2) - (V1*(C12_1**2)/C11_1 + V2*(C12_2**2)/C11_2) + (C12_eff**2)/C11_eff # Esse eu ainda não calculei
-    G_eff = 1.0 / (V1/G_1 + V2/G_2) # Nem esse
+    C22_eff = (V1*C11_1 + V2*C11_2) - (V1*(C12_1**2)/C11_1 + V2*(C12_2**2)/C11_2) + (C12_eff**2)/C11_eff
+    G_eff = 1.0 / (V1/G_1 + V2/G_2)
 
     # =======================================================
     # 3. MALHA E FRONTEIRAS (Comum para ambos os modelos)
     # =======================================================
-    # 800 elementos em R para garantir 20 elementos DENTRO de cada camada
-    mesh = RectangleMesh(Point(R_int, 0.0), Point(R_ext, H), 800, 10)
+    notificar("Gerando malha e definindo subdomínios...")
 
-    # Visualizar a malha
-    # plot(mesh)
+    mesh = RectangleMesh(Point(R_int, 0.0), Point(R_ext, H), int(n_elem_r), int(n_elem_z))
 
     boundaries = MeshFunction("size_t", mesh, mesh.topology().dim() - 1)
     boundaries.set_all(0)
@@ -59,16 +78,16 @@ def comparar_mha_mef():
     CompiledSubDomain("near(x[1], H)", H=H).mark(boundaries, 3)             # Topo
     ds_custom = Measure("ds", domain=mesh, subdomain_data=boundaries)
 
-    V = VectorFunctionSpace(mesh, "CG", 1)
-    u = TrialFunction(V)
-    v = TestFunction(V)
+    V_space = VectorFunctionSpace(mesh, "CG", 1)
+    u = TrialFunction(V_space)
+    v = TestFunction(V_space)
     x = SpatialCoordinate(mesh)
     r = x[0]
 
     # Condições de Contorno (Travando Z para simular Estado Plano 1D do seu Notebook)
     bcs = [
-        DirichletBC(V.sub(1), Constant(0.0), boundaries, 2), # Trava base
-        DirichletBC(V.sub(1), Constant(0.0), boundaries, 3)  # Trava topo
+        DirichletBC(V_space.sub(1), Constant(0.0), boundaries, 2), # Trava base
+        DirichletBC(V_space.sub(1), Constant(0.0), boundaries, 3)  # Trava topo
     ]
 
     T = -Constant(P_int) * FacetNormal(mesh)
@@ -77,6 +96,8 @@ def comparar_mha_mef():
     # =======================================================
     # 4. MODELO 1: MEF HETEROGÊNEO (Múltiplas Camadas)
     # =======================================================
+    notificar("Resolvendo modelo MEF Heterogêneo...")
+
     class PeriodicProperty(UserExpression):
         def __init__(self, val1, val2, interfaces, **kwargs):
             super().__init__(**kwargs)
@@ -102,14 +123,15 @@ def comparar_mha_mef():
     def sigma_mef(u):
         return lmbda_func * tr(eps(u)) * Identity(3) + 2.0 * mu_func * eps(u)
 
-    print("Resolvendo modelo MEF Heterogêneo...")
     a_mef = inner(sigma_mef(u), eps(v)) * r * dx
-    u_mef = Function(V)
+    u_mef = Function(V_space)
     solve(a_mef == L, u_mef, bcs)
 
     # =======================================================
     # 5. MODELO 2: MHA HOMOGENEIZADO (Material Equivalente)
     # =======================================================
+    notificar("Resolvendo modelo MHA Homogeneizado...")
+
     def sigma_mha(u):
         # Tensor de tensão para o material homogeneizado transversalmente isotrópico
         err = u[0].dx(0)
@@ -125,19 +147,43 @@ def comparar_mha_mef():
 
         return as_tensor([[srr, 0, srz], [0, stt, 0], [srz, 0, szz]])
 
-    print("Resolvendo modelo MHA Homogeneizado...")
     a_mha = inner(sigma_mha(u), eps(v)) * r * dx
-    u_mha = Function(V)
+    u_mha = Function(V_space)
     solve(a_mha == L, u_mha, bcs)
 
     # =======================================================
-    # 6. EXTRAÇÃO E PLOTAGEM
+    # 6. EXTRAÇÃO DE RESULTADOS
     # =======================================================
+    notificar("Extraindo resultados...")
+
     R_vals = np.linspace(R_int, R_ext, 1000)
     Z_val = H / 2.0 # Extrai na metade da altura
 
     u_r_mef = [u_mef(r, Z_val)[0] for r in R_vals]
     u_r_mha = [u_mha(r, Z_val)[0] for r in R_vals]
+
+    erro_abs = np.abs(np.array(u_r_mef) - np.array(u_r_mha))
+
+    return {
+        "R_vals": R_vals,
+        "u_r_mef": u_r_mef,
+        "u_r_mha": u_r_mha,
+        "erro_abs": erro_abs,
+        "interfaces": interfaces,
+        "N_camadas": N_camadas,
+        "n_elem_r": n_elem_r,
+        "n_elem_z": n_elem_z,
+        "total_elementos": n_elem_r * n_elem_z,
+    }
+
+
+if __name__ == "__main__":
+    resultados = comparar_mha_mef()
+
+    R_vals = resultados["R_vals"]
+    u_r_mef = resultados["u_r_mef"]
+    u_r_mha = resultados["u_r_mha"]
+    interfaces = resultados["interfaces"]
 
     plt.figure(figsize=(10, 6))
     plt.plot(R_vals, u_r_mef, 'b-', label='MEF (Heterogêneo - 40 Camadas)', linewidth=1.5)
@@ -155,6 +201,3 @@ def comparar_mha_mef():
     plt.tight_layout()
     plt.savefig('/plots/comparacao_mha_mef.png')
     plt.show()
-
-if __name__ == "__main__":
-    comparar_mha_mef()
